@@ -1,4 +1,5 @@
 use kronforce::db::models::*;
+use kronforce::executor::notifications::SignalConfig;
 
 // --- TaskType serialization ---
 
@@ -222,6 +223,47 @@ fn test_notification_config_defaults() {
     assert!(!config.on_success);
     assert!(!config.on_assertion_failure);
     assert!(config.recipients.is_none());
+}
+
+// --- SignalConfig ---
+
+#[test]
+fn test_signal_config_serde_round_trip() {
+    let config = SignalConfig {
+        enabled: true,
+        daemon_url: "http://localhost:7583".to_string(),
+        sender: "+15052166641".to_string(),
+        recipients: vec!["+13204204466".to_string()],
+    };
+    let json = serde_json::to_string(&config).unwrap();
+    let back: SignalConfig = serde_json::from_str(&json).unwrap();
+    assert!(back.enabled);
+    assert_eq!(back.daemon_url, "http://localhost:7583");
+    assert_eq!(back.sender, "+15052166641");
+    assert_eq!(back.recipients, vec!["+13204204466"]);
+}
+
+#[test]
+fn test_signal_config_recipients_defaults_empty() {
+    let json = r#"{"enabled":false,"daemon_url":"http://localhost:7583","sender":"+15550001234"}"#;
+    let config: SignalConfig = serde_json::from_str(json).unwrap();
+    assert!(!config.enabled);
+    assert!(config.recipients.is_empty());
+}
+
+#[test]
+fn test_signal_config_multiple_recipients() {
+    let config = SignalConfig {
+        enabled: true,
+        daemon_url: "http://signal.local:7583".to_string(),
+        sender: "+15050000000".to_string(),
+        recipients: vec!["+11111111111".to_string(), "+12222222222".to_string()],
+    };
+    let json = serde_json::to_string(&config).unwrap();
+    assert!(json.contains("+11111111111"));
+    assert!(json.contains("+12222222222"));
+    let back: SignalConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.recipients.len(), 2);
 }
 
 // --- ExecutionStatus ---

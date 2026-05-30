@@ -124,6 +124,21 @@
                     </div>
                 </div>
                 <div class="settings-group">
+                    <label class="settings-label">Signal (signal-cli daemon)</label>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap">
+                        <label style="font-size:12px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="notif-signal-enabled"> Enabled</label>
+                    </div>
+                    <input id="notif-signal-url" type="text" placeholder="http://localhost:7583" style="width:100%;margin-top:6px">
+                    <div style="display:flex;gap:8px;margin-top:4px">
+                        <input id="notif-signal-sender" type="text" placeholder="sender number e.g. +15550001234" style="flex:1">
+                    </div>
+                    <div style="margin-top:4px">
+                        <label style="font-size:11px;color:var(--text-muted)">Recipient numbers (one per line)</label>
+                        <textarea id="notif-signal-recipients" rows="3" style="width:100%;font-size:12px" placeholder="+15559876543&#10;+15551234567"></textarea>
+                    </div>
+                    <div class="form-hint" style="margin-top:4px">Sends via signal-cli JSON-RPC daemon. The daemon must be running and the sender account must be registered.</div>
+                </div>
+                <div class="settings-group">
                     <label class="settings-label">Recipients</label>
                     <div style="display:flex;gap:8px">
                         <div style="flex:1">
