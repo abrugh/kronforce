@@ -362,6 +362,63 @@ curl -X PUT http://localhost:8080/api/settings \
 
 Default: 90 days. The audit log is not affected by the regular `retention_days` setting.
 
+## Notifications
+
+Kronforce can send notifications on job failure, success, or system events (e.g., agent offline) via multiple channels configured in **Settings → Notifications**.
+
+### Email (SMTP)
+
+Configure SMTP credentials and a list of recipient email addresses. Notifications are sent using TLS by default.
+
+```bash
+curl -X PUT http://localhost:8080/api/settings \
+  -H "Authorization: ******" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "notification_email": "{\"enabled\":true,\"smtp_host\":\"smtp.example.com\",\"smtp_port\":587,\"username\":\"user\",\"password\":\"pass\",\"from\":\"alerts@example.com\",\"tls\":true}",
+    "notification_recipients": "{\"emails\":[\"ops@example.com\"],\"phones\":[]}"
+  }'
+```
+
+### SMS (Webhook)
+
+Configure a Twilio-compatible HTTP webhook URL. An HTTP POST is made to the URL with `{"To": ..., "From": ..., "Body": ...}` for each recipient.
+
+### Signal CLI Daemon
+
+Kronforce can send notifications via a running [signal-cli](https://github.com/AsamK/signal-cli) daemon. The daemon must be reachable over HTTP and have the sender account registered.
+
+The Signal channel uses the signal-cli JSON-RPC API (sent as HTTP POST). Each notification is dispatched to all configured recipients in a single call.
+
+**Settings UI:** Go to **Settings → Notifications → Signal (signal-cli daemon)** and fill in:
+
+| Field | Description |
+|-------|-------------|
+| Daemon URL | Base URL of the signal-cli daemon, e.g. `http://localhost:7583` |
+| Sender number | The Signal account number registered with the daemon, e.g. `+15052166641` |
+| Recipient numbers | One phone number per line, e.g. `+13204204466` |
+
+**API:**
+
+```bash
+curl -X PUT http://localhost:8080/api/settings \
+  -H "Authorization: ******" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "notification_signal": "{\"enabled\":true,\"daemon_url\":\"http://localhost:7583\",\"sender\":\"+15052166641\",\"recipients\":[\"+13204204466\"]}"
+  }'
+```
+
+**Test:** After saving, click **Send Test** (or `POST /api/notifications/test`) to verify the daemon connection.
+
+**signal-cli daemon setup (reference):** Run signal-cli in HTTP daemon mode:
+
+```bash
+signal-cli --account +15052166641 daemon --http 0.0.0.0:7583
+```
+
+Or see the signal-cli documentation for systemd service configuration.
+
 ## Scaling Agents
 
 Deploy multiple agents by running `docker-compose.agent.yml` on different machines with unique names:

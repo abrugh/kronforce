@@ -59,6 +59,12 @@ async function loadNotificationSettings() {
         document.getElementById('notif-sms-pass').value = sms.auth_pass || '';
         document.getElementById('notif-sms-from').value = sms.from_number || '';
 
+        const signal = settings.notification_signal ? JSON.parse(settings.notification_signal) : {};
+        document.getElementById('notif-signal-enabled').checked = signal.enabled || false;
+        document.getElementById('notif-signal-url').value = signal.daemon_url || '';
+        document.getElementById('notif-signal-sender').value = signal.sender || '';
+        document.getElementById('notif-signal-recipients').value = (signal.recipients || []).join('\n');
+
         const recipients = settings.notification_recipients ? JSON.parse(settings.notification_recipients) : {};
         document.getElementById('notif-emails').value = (recipients.emails || []).join('\n');
         document.getElementById('notif-phones').value = (recipients.phones || []).join('\n');
@@ -87,6 +93,12 @@ async function saveNotificationSettings() {
             auth_user: document.getElementById('notif-sms-user').value.trim() || null,
             auth_pass: document.getElementById('notif-sms-pass').value || null,
             from_number: document.getElementById('notif-sms-from').value.trim() || null,
+        });
+        settings.notification_signal = JSON.stringify({
+            enabled: document.getElementById('notif-signal-enabled').checked,
+            daemon_url: document.getElementById('notif-signal-url').value.trim(),
+            sender: document.getElementById('notif-signal-sender').value.trim(),
+            recipients: document.getElementById('notif-signal-recipients').value.split('\n').map(s => s.trim()).filter(Boolean),
         });
         settings.notification_recipients = JSON.stringify({
             emails: document.getElementById('notif-emails').value.split('\n').map(s => s.trim()).filter(Boolean),

@@ -25,6 +25,26 @@ pub struct SmsConfig {
     pub from_number: Option<String>,
 }
 
+/// Signal CLI daemon notification configuration.
+///
+/// Points at a running signal-cli daemon (JSON-RPC over HTTP) and sends
+/// messages from a registered sender account to one or more recipient numbers.
+///
+/// The `daemon_url` should be the base URL of the daemon, e.g.
+/// `http://localhost:7583`.  A POST is made to that URL with the
+/// standard signal-cli JSON-RPC `send` payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalConfig {
+    pub enabled: bool,
+    /// Base URL of the signal-cli daemon, e.g. `http://localhost:7583`.
+    pub daemon_url: String,
+    /// Registered Signal account (phone number) to send from, e.g. `+15052166641`.
+    pub sender: String,
+    /// Recipient phone numbers, e.g. `["+13204204466"]`.
+    #[serde(default)]
+    pub recipients: Vec<String>,
+}
+
 /// Email addresses and phone numbers that receive notifications.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NotificationRecipients {
@@ -63,6 +83,15 @@ pub fn load_sms_config(db: &Db) -> Option<SmsConfig> {
         .filter(|c: &SmsConfig| c.enabled)
 }
 
+/// Loads the Signal CLI daemon configuration from the database, returning `None` if disabled.
+pub fn load_signal_config(db: &Db) -> Option<SignalConfig> {
+    db.get_setting("notification_signal")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .filter(|c: &SignalConfig| c.enabled && !c.recipients.is_empty())
+}
+
 /// Loads the global notification recipients from the database.
 pub fn load_recipients(db: &Db) -> NotificationRecipients {
     db.get_setting("notification_recipients")
@@ -81,7 +110,7 @@ pub fn load_system_alerts(db: &Db) -> SystemAlerts {
         .unwrap_or_default()
 }
 
-/// Sends a notification via all enabled channels (email, SMS) to the given or global recipients.
+/// Sends a notification via all enabled channels (email, SMS, Signal) to the given or global recipients.
 pub async fn send_notification(
     db: &Db,
     subject: &str,
@@ -147,6 +176,40 @@ pub async fn send_notification(
                         "notification.failed",
                         EventSeverity::Error,
                         &format!("SMS failed: {} — {}", subj, e),
+                        None,
+                        None,
+                    );
+                }
+            }
+        });
+    }
+
+    // Signal uses its own configured recipient list; per-job overrides apply to
+    // email/phone only so we always dispatch to the global Signal recipients.
+    if let Some(signal_config) = load_signal_config(db) {
+        let msg = format!("{}\n{}", subject, body);
+        let subj = subject.to_string();
+        let db_clone = db.clone();
+        tokio::spawn(async move {
+            match send_signal(&signal_config, &msg).await {
+                Ok(_) => {
+                    let _ = db_clone.log_event(
+                        "notification.sent",
+                        EventSeverity::Info,
+                        &format!(
+                            "Signal sent to {} recipient(s): {}",
+                            signal_config.recipients.len(),
+                            subj
+                        ),
+                        None,
+                        None,
+                    );
+                }
+                Err(e) => {
+                    let _ = db_clone.log_event(
+                        "notification.failed",
+                        EventSeverity::Error,
+                        &format!("Signal failed: {} — {}", subj, e),
                         None,
                         None,
                     );
@@ -282,6 +345,46 @@ pub async fn send_sms(config: &SmsConfig, to: &[String], body: &str) -> Result<(
     Ok(())
 }
 
+/// Sends a message to all configured Signal recipients via the signal-cli JSON-RPC daemon.
+///
+/// The daemon is expected to be reachable at `config.daemon_url` and to accept
+/// the standard signal-cli JSON-RPC `send` method over HTTP POST.
+pub async fn send_signal(config: &SignalConfig, message: &str) -> Result<(), String> {
+    let client = reqwest::Client::new();
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "send",
+        "id": 1,
+        "params": {
+            "account": config.sender,
+            "recipient": config.recipients,
+            "message": message,
+        }
+    });
+
+    let resp = client
+        .post(&config.daemon_url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Signal daemon request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Signal daemon returned {}: {}", status, text));
+    }
+
+    // Check for a JSON-RPC error object in the response body.
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    if let Some(err) = body.get("error") {
+        return Err(format!("Signal daemon error: {}", err));
+    }
+
+    Ok(())
+}
+
 /// Send a test notification to verify channel configuration
 pub async fn send_test(db: &Db) -> Result<String, String> {
     let recipients = load_recipients(db);
@@ -324,6 +427,18 @@ pub async fn send_test(db: &Db) -> Result<String, String> {
         }
     } else {
         results.push("SMS channel not enabled".to_string());
+    }
+
+    if let Some(signal_config) = load_signal_config(db) {
+        match send_signal(&signal_config, "[Kronforce] Test notification").await {
+            Ok(_) => results.push(format!(
+                "Signal sent to {} recipient(s)",
+                signal_config.recipients.len()
+            )),
+            Err(e) => results.push(format!("Signal failed: {}", e)),
+        }
+    } else {
+        results.push("Signal channel not enabled".to_string());
     }
 
     Ok(results.join("; "))
