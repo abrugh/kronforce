@@ -89,7 +89,7 @@ pub fn load_signal_config(db: &Db) -> Option<SignalConfig> {
         .ok()
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .filter(|c: &SignalConfig| c.enabled && !c.recipients.is_empty())
+        .filter(|c: &SignalConfig| c.enabled)
 }
 
 /// Loads the global notification recipients from the database.
@@ -186,7 +186,9 @@ pub async fn send_notification(
 
     // Signal uses its own configured recipient list; per-job overrides apply to
     // email/phone only so we always dispatch to the global Signal recipients.
-    if let Some(signal_config) = load_signal_config(db) {
+    if let Some(signal_config) = load_signal_config(db)
+        && !signal_config.recipients.is_empty()
+    {
         let msg = format!("{}\n{}", subject, body);
         let subj = subject.to_string();
         let db_clone = db.clone();
@@ -350,12 +352,16 @@ pub async fn send_sms(config: &SmsConfig, to: &[String], body: &str) -> Result<(
 /// The daemon is expected to be reachable at `config.daemon_url` and to accept
 /// the standard signal-cli JSON-RPC `send` method over HTTP POST.
 pub async fn send_signal(config: &SignalConfig, message: &str) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+    let id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+
     let client = reqwest::Client::new();
 
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "send",
-        "id": 1,
+        "id": id,
         "params": {
             "account": config.sender,
             "recipient": config.recipients,
@@ -376,10 +382,19 @@ pub async fn send_signal(config: &SignalConfig, message: &str) -> Result<(), Str
         return Err(format!("Signal daemon returned {}: {}", status, text));
     }
 
-    // Check for a JSON-RPC error object in the response body.
+    // Check for a JSON-RPC error object in the response body and extract a
+    // human-readable message where available.
     let body: serde_json::Value = resp.json().await.unwrap_or_default();
     if let Some(err) = body.get("error") {
-        return Err(format!("Signal daemon error: {}", err));
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        let code = err.get("code").and_then(|c| c.as_i64());
+        return Err(match code {
+            Some(c) => format!("Signal daemon error (code {}): {}", c, msg),
+            None => format!("Signal daemon error: {}", msg),
+        });
     }
 
     Ok(())
@@ -430,12 +445,16 @@ pub async fn send_test(db: &Db) -> Result<String, String> {
     }
 
     if let Some(signal_config) = load_signal_config(db) {
-        match send_signal(&signal_config, "[Kronforce] Test notification").await {
-            Ok(_) => results.push(format!(
-                "Signal sent to {} recipient(s)",
-                signal_config.recipients.len()
-            )),
-            Err(e) => results.push(format!("Signal failed: {}", e)),
+        if signal_config.recipients.is_empty() {
+            results.push("Signal enabled but no recipients configured".to_string());
+        } else {
+            match send_signal(&signal_config, "[Kronforce] Test notification").await {
+                Ok(_) => results.push(format!(
+                    "Signal sent to {} recipient(s)",
+                    signal_config.recipients.len()
+                )),
+                Err(e) => results.push(format!("Signal failed: {}", e)),
+            }
         }
     } else {
         results.push("Signal channel not enabled".to_string());
