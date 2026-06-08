@@ -332,7 +332,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
                         );
                         kronforce::executor::notifications::send_notification(
-                            &db_notif, &subject, &body, None,
+                            &db_notif, &subject, &body, None, None,
                         )
                         .await;
                     }

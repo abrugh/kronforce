@@ -237,6 +237,8 @@ async function loadNotificationSettings() {
         document.getElementById('notif-webhook-url').value = webhook.url || '';
         document.getElementById('notif-webhook-format').value = webhook.format || 'slack';
         document.getElementById('notif-webhook-headers').value = webhook.headers && Object.keys(webhook.headers).length ? JSON.stringify(webhook.headers) : '';
+        document.getElementById('notif-webhook-template').value = webhook.template || '';
+        toggleWebhookTemplate();
 
         const recipients = settings.notification_recipients ? JSON.parse(settings.notification_recipients) : {};
         document.getElementById('notif-emails').value = (recipients.emails || []).join('\n');
@@ -269,11 +271,13 @@ async function saveNotificationSettings() {
         });
         let webhookHeaders = {};
         try { const h = document.getElementById('notif-webhook-headers').value.trim(); if (h) webhookHeaders = JSON.parse(h); } catch(e) { /* ignore invalid JSON */ }
+        const webhookTemplate = document.getElementById('notif-webhook-template').value.trim();
         settings.notification_webhook = JSON.stringify({
             enabled: document.getElementById('notif-webhook-enabled').checked,
             url: document.getElementById('notif-webhook-url').value.trim(),
             format: document.getElementById('notif-webhook-format').value,
             headers: webhookHeaders,
+            template: webhookTemplate || null,
         });
         settings.notification_recipients = JSON.stringify({
             emails: document.getElementById('notif-emails').value.split('\n').map(s => s.trim()).filter(Boolean),
@@ -307,3 +311,39 @@ async function testNotification() {
     }
 }
 
+function toggleWebhookTemplate() {
+    const format = document.getElementById('notif-webhook-format').value;
+    const wrap = document.getElementById('notif-webhook-template-wrap');
+    if (wrap) wrap.style.display = format === 'custom' ? '' : 'none';
+}
+
+const WEBHOOK_TEMPLATE_PRESETS = {
+    discord: JSON.stringify({
+        embeds: [{
+            title: "{{subject}}",
+            description: "{{body}}",
+            color: 3066993,
+            footer: { text: "Kronforce" },
+            timestamp: "{{timestamp}}"
+        }]
+    }, null, 2),
+    slack: JSON.stringify({
+        text: "*{{subject}}*\n{{body}}"
+    }, null, 2),
+    signal: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "send",
+        params: {
+            recipient: ["+1234567890"],
+            message: "{{subject}}\n{{body}}"
+        },
+        id: 1
+    }, null, 2),
+};
+
+function loadTemplatePreset(name) {
+    const el = document.getElementById('notif-webhook-template');
+    if (el && WEBHOOK_TEMPLATE_PRESETS[name]) {
+        el.value = WEBHOOK_TEMPLATE_PRESETS[name];
+    }
+}

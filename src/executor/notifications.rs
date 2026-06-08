@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::db::Db;
 use crate::db::models::{EventSeverity, ExecutionStatus, JobNotificationConfig};
 use serde::{Deserialize, Serialize};
@@ -25,17 +27,35 @@ pub struct SmsConfig {
     pub from_number: Option<String>,
 }
 
-/// Webhook notification configuration (Slack, Teams, PagerDuty, generic).
+/// Webhook notification configuration (Slack, Teams, PagerDuty, generic, custom template).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookConfig {
     pub enabled: bool,
     pub url: String,
-    /// Webhook format: "slack", "teams", "pagerduty", "discord", or "generic" (default).
+    /// Webhook format: "slack", "teams", "pagerduty", "discord", "custom", "passthrough", or "generic" (default).
     #[serde(default = "default_generic")]
     pub format: String,
     /// Optional custom headers (e.g., Authorization).
     #[serde(default)]
-    pub headers: std::collections::HashMap<String, String>,
+    pub headers: HashMap<String, String>,
+    /// Custom JSON template with `{{placeholder}}` variables. Used when format is "custom".
+    /// Available placeholders: {{subject}}, {{body}}, {{job_name}}, {{status}},
+    /// {{execution_id}}, {{stdout}}, {{stderr}}, {{timestamp}}.
+    #[serde(default)]
+    pub template: Option<String>,
+}
+
+/// Context passed to webhook template rendering. Contains all available placeholder values.
+#[derive(Debug, Clone, Default)]
+pub struct WebhookContext {
+    pub subject: String,
+    pub body: String,
+    pub job_name: Option<String>,
+    pub status: Option<String>,
+    pub execution_id: Option<String>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    pub timestamp: String,
 }
 
 fn default_generic() -> String {
@@ -107,12 +127,13 @@ pub fn load_system_alerts(db: &Db) -> SystemAlerts {
         .unwrap_or_default()
 }
 
-/// Sends a notification via all enabled channels (email, SMS) to the given or global recipients.
+/// Sends a notification via all enabled channels (email, SMS, webhook) to the given or global recipients.
 pub async fn send_notification(
     db: &Db,
     subject: &str,
     body: &str,
     recipient_override: Option<&NotificationRecipients>,
+    webhook_context: Option<WebhookContext>,
 ) {
     let recipients = match recipient_override {
         Some(r) if !r.emails.is_empty() || !r.phones.is_empty() => r.clone(),
@@ -185,8 +206,14 @@ pub async fn send_notification(
         let subj = subject.to_string();
         let bod = body.to_string();
         let db_clone = db.clone();
+        let ctx = webhook_context.unwrap_or_else(|| WebhookContext {
+            subject: subj.clone(),
+            body: bod.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            ..Default::default()
+        });
         tokio::spawn(async move {
-            match send_webhook(&webhook_config, &subj, &bod).await {
+            match send_webhook(&webhook_config, &subj, &bod, Some(&ctx)).await {
                 Ok(_) => {
                     let _ = db_clone.log_event(
                         "notification.sent",
@@ -281,7 +308,22 @@ pub async fn notify_execution_complete(
         emails: r.emails.clone(),
         phones: r.phones.clone(),
     });
-    send_notification(db, &subject, &body, recipients.as_ref()).await;
+    let context = WebhookContext {
+        subject: subject.clone(),
+        body: body.clone(),
+        job_name: Some(job_name.to_string()),
+        status: Some(match exec_status {
+            ExecutionStatus::Succeeded => "succeeded".to_string(),
+            ExecutionStatus::Failed => "failed".to_string(),
+            ExecutionStatus::TimedOut => "timed_out".to_string(),
+            _ => "completed".to_string(),
+        }),
+        execution_id: Some(exec_id_short.to_string()),
+        stdout: Some(stdout.to_string()),
+        stderr: Some(stderr.to_string()),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    send_notification(db, &subject, &body, recipients.as_ref(), Some(context)).await;
 }
 
 /// Sends an email to one or more recipients via SMTP.
@@ -362,9 +404,40 @@ pub async fn send_sms(config: &SmsConfig, to: &[String], body: &str) -> Result<(
     Ok(())
 }
 
-/// Sends a notification via a webhook (Slack, Teams, PagerDuty, Discord, or generic JSON POST).
-pub async fn send_webhook(config: &WebhookConfig, subject: &str, body: &str) -> Result<(), String> {
+/// Renders a template string by replacing `{{placeholder}}` markers with values from the context.
+fn render_template(template: &str, ctx: &WebhookContext) -> String {
+    let mut result = template.to_string();
+    result = result.replace("{{subject}}", &ctx.subject);
+    result = result.replace("{{body}}", &ctx.body);
+    result = result.replace("{{job_name}}", ctx.job_name.as_deref().unwrap_or(""));
+    result = result.replace("{{status}}", ctx.status.as_deref().unwrap_or(""));
+    result = result.replace(
+        "{{execution_id}}",
+        ctx.execution_id.as_deref().unwrap_or(""),
+    );
+    result = result.replace("{{stdout}}", ctx.stdout.as_deref().unwrap_or(""));
+    result = result.replace("{{stderr}}", ctx.stderr.as_deref().unwrap_or(""));
+    result = result.replace("{{timestamp}}", &ctx.timestamp);
+    result
+}
+
+/// Sends a notification via a webhook (Slack, Teams, PagerDuty, Discord, custom template, or generic JSON POST).
+pub async fn send_webhook(
+    config: &WebhookConfig,
+    subject: &str,
+    body: &str,
+    context: Option<&WebhookContext>,
+) -> Result<(), String> {
     let client = reqwest::Client::new();
+
+    // Build a default context if none provided
+    let default_ctx = WebhookContext {
+        subject: subject.to_string(),
+        body: body.to_string(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        ..Default::default()
+    };
+    let ctx = context.unwrap_or(&default_ctx);
 
     let payload = match config.format.as_str() {
         "slack" => serde_json::json!({
@@ -403,6 +476,33 @@ pub async fn send_webhook(config: &WebhookConfig, subject: &str, body: &str) -> 
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                 }]
             })
+        }
+        "custom" => {
+            let template = config
+                .template
+                .as_deref()
+                .unwrap_or(r#"{"text": "{{subject}}\n{{body}}"}"#);
+            let rendered = render_template(template, ctx);
+            serde_json::from_str(&rendered).map_err(|e| {
+                format!("custom template produced invalid JSON: {e}\nRendered: {rendered}")
+            })?
+        }
+        "passthrough" => {
+            // In passthrough mode, stdout IS the payload. If stdout is valid JSON, send it raw.
+            // Falls back to generic format if stdout is empty or not valid JSON.
+            let raw = ctx.stdout.as_deref().unwrap_or("").trim();
+            if raw.is_empty() {
+                serde_json::json!({
+                    "subject": subject,
+                    "body": body,
+                    "source": "kronforce",
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                })
+            } else {
+                serde_json::from_str(raw).map_err(|e| {
+                    format!("passthrough mode requires stdout to be valid JSON: {e}")
+                })?
+            }
         }
         _ => serde_json::json!({
             "subject": subject,
@@ -482,6 +582,7 @@ pub async fn send_test(db: &Db) -> Result<String, String> {
             &webhook_config,
             "[Kronforce] Test Notification",
             "This is a test notification from Kronforce.",
+            None,
         )
         .await
         {
@@ -493,4 +594,65 @@ pub async fn send_test(db: &Db) -> Result<String, String> {
     }
 
     Ok(results.join("; "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_template_all_placeholders() {
+        let ctx = WebhookContext {
+            subject: "Job 'deploy' succeeded".to_string(),
+            body: "All good".to_string(),
+            job_name: Some("deploy".to_string()),
+            status: Some("succeeded".to_string()),
+            execution_id: Some("abc123".to_string()),
+            stdout: Some("deployed v2.0".to_string()),
+            stderr: Some("".to_string()),
+            timestamp: "2026-06-08T12:00:00Z".to_string(),
+        };
+        let template = r#"{"title":"{{subject}}","output":"{{stdout}}","job":"{{job_name}}","status":"{{status}}","exec":"{{execution_id}}","ts":"{{timestamp}}"}"#;
+        let rendered = render_template(template, &ctx);
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(parsed["title"], "Job 'deploy' succeeded");
+        assert_eq!(parsed["output"], "deployed v2.0");
+        assert_eq!(parsed["job"], "deploy");
+        assert_eq!(parsed["status"], "succeeded");
+        assert_eq!(parsed["exec"], "abc123");
+        assert_eq!(parsed["ts"], "2026-06-08T12:00:00Z");
+    }
+
+    #[test]
+    fn test_render_template_missing_optional_fields() {
+        let ctx = WebhookContext {
+            subject: "test".to_string(),
+            body: "hello".to_string(),
+            job_name: None,
+            status: None,
+            execution_id: None,
+            stdout: None,
+            stderr: None,
+            timestamp: "now".to_string(),
+        };
+        let template = r#"{"msg":"{{subject}} {{job_name}}"}"#;
+        let rendered = render_template(template, &ctx);
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(parsed["msg"], "test ");
+    }
+
+    #[test]
+    fn test_render_template_discord_preset() {
+        let ctx = WebhookContext {
+            subject: "Build done".to_string(),
+            body: "Success".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            ..Default::default()
+        };
+        let template = r#"{"embeds":[{"title":"{{subject}}","description":"{{body}}","timestamp":"{{timestamp}}"}]}"#;
+        let rendered = render_template(template, &ctx);
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(parsed["embeds"][0]["title"], "Build done");
+        assert_eq!(parsed["embeds"][0]["description"], "Success");
+    }
 }
