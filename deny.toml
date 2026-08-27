@@ -5,6 +5,14 @@ targets = []
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 
+# smartstring (transitive dep of rhai, used for script jobs) was archived
+# upstream on 2026-05-03 with no safe upgrade available (RUSTSEC-2026-0249).
+# rhai 1.26.0 still depends on it, so the only fix is replacing rhai.
+# Re-evaluate before 2026-12-31.
+ignore = [
+    { id = "RUSTSEC-2026-0249", reason = "smartstring is a transitive dep of rhai (script jobs); crate archived 2026-05-03 with no safe upgrade — tracked for replacement, re-evaluate 2026-12-31" },
+]
+
 [licenses]
 allow = [
     "MIT",
